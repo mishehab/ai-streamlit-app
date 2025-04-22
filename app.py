@@ -1,8 +1,16 @@
+import os
+import time
 import streamlit as st
 from streamlit_drawable_canvas import st_canvas
 import tensorflow as tf
 import numpy as np
 import cv2
+
+# --- Environment adjustments for stability
+# (optional: enforce simpler server environment)
+os.environ["STREAMLIT_SERVER_RUN_ON_SAVE"] = "false"
+os.environ["STREAMLIT_SERVER_HEADLESS"]  = "true"
+
 
 # -- 1) Preprocessing function ------------------------------------------------
 def preprocess_img(img):
@@ -23,21 +31,33 @@ def preprocess_img(img):
 
     # Resize and pad to 28x28
     ratio = 20 / max(cropped.shape)
-    resized = cv2.resize(cropped, 
-                        (int(cropped.shape[1]*ratio), 
-                         int(cropped.shape[0]*ratio)),
-                        interpolation=cv2.INTER_AREA)
-    
+    resized = cv2.resize(
+        cropped,
+        (int(cropped.shape[1] * ratio), int(cropped.shape[0] * ratio)),
+        interpolation=cv2.INTER_AREA
+    )
     canvas = np.zeros((28, 28), dtype=np.uint8)
     dx = (28 - resized.shape[1]) // 2
     dy = (28 - resized.shape[0]) // 2
-    canvas[dy:dy+resized.shape[0], dx:dx+resized.shape[1]] = resized
+    canvas[dy:dy + resized.shape[0], dx:dx + resized.shape[1]] = resized
     
     # Normalize and reshape for model
     return (canvas.astype(np.float32) / 255.0).reshape(1, 28, 28, 1)
 
-# -- 2) Load model -----------------------------------------------------------
-model = tf.keras.models.load_model("digit_recognition_model.keras",compile=False)  # Remove compile=False
+# -- 2) Load model with caching & retries -------------------------------------
+@st.cache_resource
+def get_model(path="digit_recognition_model.keras"):
+    """Load and cache the TensorFlow model, retrying on transient failures"""
+    for attempt in range(3):
+        try:
+            return tf.keras.models.load_model(path, compile=False)
+        except Exception as e:
+            st.warning(f"Model load failed (attempt {attempt+1}/3): {e}")
+            time.sleep(1)
+    st.error(f"Failed to load model from {path} after 3 attempts.")
+    raise RuntimeError(f"Could not load model from {path}")
+
+model = get_model()
 
 # -- 3) Streamlit UI ---------------------------------------------------------
 st.title("✏️ Draw a Digit")
@@ -56,17 +76,15 @@ canvas = st_canvas(
 
 # -- 4) Prediction logic -----------------------------------------------------
 if canvas.image_data is not None:
-    # Process image
     processed = preprocess_img(canvas.image_data)
     
     # Show processed image
-    st.image(processed[0, :, :, 0], width=140, 
-            caption="Processed Input")
+    st.image(processed[0, :, :, 0], width=140, caption="Processed Input")
     
     # Make prediction
     pred = model.predict(processed, verbose=0)[0]
     digit = np.argmax(pred)
     confidence = pred[digit]
     
-    st.subheader(f"Prediction: {digit} ({(confidence*100):.1f}% confidence)")
+    st.subheader(f"Prediction: {digit} ({confidence*100:.1f}% confidence)")
     st.bar_chart(pred)
